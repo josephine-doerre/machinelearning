@@ -1,0 +1,135 @@
+---
+title: 'Practical Machine Learning: Prediction Assignment Writeup'
+author: "Josephine D."
+date: "15 4 2021"
+output:
+  html_document: default
+  pdf_document: default
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+In this project, machine learning algorithms are formed in order to predict movement patterns from six participants of a study in the scientific field of Human Activity Recognition (HAR). The study **"Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements"** from Ugulino, W. et al. and the data can be found [here](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har). In the study the participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal is to predict the manner in which they did the exercise.
+
+### Loading Packages
+Load the required packages for the assignment and check if the working directory is right. 
+```{r message=FALSE, warning=FALSE, results=FALSE}
+getwd()
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(AppliedPredictiveModeling)
+library(Hmisc)
+library(gridExtra)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(randomForest)
+library(corrplot)
+```
+### Loading and Cleaning the Data
+With *read_csv( )* the datasets will be read. With the *str( )* function one can get an overview of the variables, which will not be printed out here, because there are 160 of them.
+```{r df, message=FALSE, warning=FALSE, results=FALSE}
+valid_data = read_csv("pml-testing.csv")
+data = read_csv("pml-training.csv")
+str(data)
+```
+Except the *classe* variable the other 159 variables are continuous, but a lot of them contain missing values so for the purpose of prediction the data must be cleaned of it. The first seven variables contain general information that are not useful for the later application of an machine learning (ML) algorithm for classification.
+
+```{r message=FALSE, warning=FALSE}
+dim(data)
+table(data$classe)
+# clean the data and validation data for existing NA 
+data_noNA <- select_if(data, function(x) !any(is.na(x)))
+data_noNA <- subset(data_noNA, select = -c(1:7))
+valid_data <- select_if(valid_data, function(x) !any(is.na(x)))
+valid_data <- subset(valid_data, select = -c(1:7))
+```
+A quick overview of the distribution of the five different classes (the five different ways of lifting) shows that all classes are about the same size except for the first one **A** which was "exactly according to the specification". This slight imbalance will be neglected in this setting. But note: a more severe imbalance of classes must be taken into account when choosing a algorithm [(source)](https://machinelearningmastery.com/what-is-imbalanced-classification/).
+
+## Split the Data
+The next step is to split the data into a training and testing set. The general rule for a  medium sample size is to split into 60 percent for the training part and 40 percent for testing. Also for reproducibility a specific seed will be set. 
+```{r message=FALSE, warning=FALSE}
+set.seed(222)
+testIndex = createDataPartition(data_noNA$classe, p = 0.6,list=FALSE)
+testing = data_noNA[-testIndex,]
+training = data_noNA[testIndex,]
+# set the classe var as factor
+testing$classe <- as.factor(testing$classe)
+```
+Since there are so many features to choose from, a check for correlation via *heatmap* between the features could be interesting. Also checking for general Variability via the *nearZeroVar*-function is useful.
+```{r }
+nearZeroVar(data_noNA)
+matrix <- cor(training[,-53])
+# round(matrix, 2)
+col<- colorRampPalette(c("red", "white", "blue"))(20)
+heatmap(x = matrix, col = col, symm = TRUE, Rowv = NA)
+```
+
+As we can see all features left have at least some variation. The *heatmap* give a glimpse that there are high correlations between many of the variables. Especially the variables that represent the x, y and z coordinates are highly correlated. 
+
+## K-fold Cross-Validation 
+The training set will divided into K=3 subsets, to take into account possible overfitting of the model.
+```{r}
+fitControl <- trainControl(method='cv', number = 3)
+```
+
+## Model Based Prediction
+#### Linear Discriminant Analysis vs. Naive Bayes
+[LDA](https://en.wikipedia.org/wiki/Linear_discriminant_analysis) is the first attempt to model the difference between the execution of the Unilateral Dumbbell Biceps Curls (Classes). This method is useful, when the independent features are continuous. 
+
+The Naive Bayes Classifier [NB](https://en.wikipedia.org/wiki/Naive_Bayes_classifier) will be used for fun and because the author has a penchant for Bayesian models. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+# LDA & Naive Bayes
+lda <- train(classe~., data=training, method="lda", trControl=fitControl)
+pred.lda <- predict(lda,testing)
+confusionMatrix(testing$classe,pred.lda)
+# nb
+nb <- train(classe ~ ., data=training, method="nb", trControl=fitControl)
+pred.nb <- predict(nb,testing)
+confusionMatrix(testing$classe,pred.nb)
+```
+
+It can be seen, that both attempt lead to acceptable acceptance rates. The Naive Bayes Classifier leads to a slightly better accuracy. Its results are therefore examined in more detail below. The Sensitivity for Class A is the lowest with 67.25 % and highest in Class E. The Specificity is near 100 % for all classes. Note that Cohen's Kappa is lower that the overall accuracy at 67.31 %, which is why the next attempt will be a random forest algorithm.
+
+## Random Forest Prediction
+A random forest algorithm will be applied on the training data with cross validation against the 52 predictors.
+```{r  cache=TRUE}
+rf <- train(classe~., data=training, method="rf", trControl=fitControl,verbose=FALSE)
+```
+
+The first plot shows the Change in the model error with growing number of trees. It can be seen that after 100 trees the largest reduction in error rate is done.
+
+```{r}
+plot(rf$finalModel,main="Model error by changing number of trees")
+plot(rf,main="Accuracy for changing number of predictors")
+```
+
+The second plot shows that the overall accuracy in the RF model has a peak at about two predictors and sinks slightly afterwards. This can be due to the fact (as seen above) that there is a lot of high correlation between the variables. Another way to approve this is the calculation of variable importance with the **varImp**-function. "For multi-class outcomes, the problem is decomposed into all pair-wise problems and the area under the curve is calculated for each class pair (i.e. class 1 vs. class 2, class 2 vs. class 3 etc.). For a specific class, the maximum area under the curve across the relevant pair-wise AUC’s is used as the variable importance measure." [Max Kuhn](https://topepo.github.io/caret/variable-importance.html) 
+
+```{r}
+impor<-varImp(rf, scale=TRUE)
+plot(impor, top = 30)
+```
+
+So the feature *"roll belt"* is the most important predictor.
+
+## Confusion-Matrix
+The model accuracy is 0.9917. Therefore the out-of-sample-error is 0.0083. 
+```{r}
+pred <- predict(rf,testing)
+confusionMatrix(testing$classe,pred)
+```
+
+# Applying the random forest model on the validation data
+Since the RF model has led to the highest accuracy, it is now used for the validation data set.
+```{r}
+predict(rf,newdata=valid_data)
+```
+
+For the constraining of text a addin from **benmarwick** was used: [word count package](https://github.com/benmarwick/wordcountaddin). 
